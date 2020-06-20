@@ -32,6 +32,8 @@ struct Prefix {
     prefix_arch: String,
     base_prefix: Option<String>,
     sandbox: bool,
+    install_gecko: bool,
+    install_mono: bool,
 }
 
 #[derive(Deserialize)]
@@ -49,7 +51,6 @@ struct Run {
 #[derive(Deserialize)]
 struct Winetricks {
     verbs: Vec<String>,
-    bundle: bool,
 }
 
 #[derive(Deserialize)]
@@ -81,14 +82,13 @@ impl Default for Config {
                     prefix_arch: "win64".to_string(),
                     base_prefix: None,
                     sandbox: true,
+                    install_mono: true,
+                    install_gecko: false,
                 },
                 volumes: vec![],
                 runs: vec![],
             },
-            winetricks: Winetricks {
-                verbs: vec![],
-                bundle: false,
-            },
+            winetricks: Winetricks { verbs: vec![] },
         }
     }
 }
@@ -103,6 +103,24 @@ impl Config {
             "https://dl.winehq.org/wine-builds/macosx/pool/portable-winehq-{}-{}-osx{}.tar.gz",
             branch, version, arch
         );
+    }
+
+    // WINEDLLOVERRIDES will let us ignore gecko and mono
+    pub fn get_wine_dll_overrides(&self) -> String {
+        let mut overrides: Vec<&str> = Vec::new();
+        if !self.wine.prefix.install_mono {
+            overrides.push("mscoree");
+        }
+        if !self.wine.prefix.install_gecko {
+            overrides.push("mshtml");
+        }
+        let winedlloverrides = format!("{}=", overrides.join(","));
+
+        return winedlloverrides;
+    }
+
+    pub fn get_app_icon(&self) -> &Option<String> {
+        return &self.app.icon;
     }
 
     pub fn get_verbs(&self) -> &Vec<String> {
@@ -122,11 +140,3 @@ pub fn load(path: String) -> Config {
     let contents = fs::read_to_string(path).expect("Unable to read config file");
     return toml::from_str(contents.as_str()).expect("Unable to parse config file");
 }
-
-// for prog_exec in &run {
-//   let prog = &prog_exec[0];
-//   let args = &prog_exec[1..];
-//   let mut child  = Command::new(prog).args(args).spawn().expect("no work");
-//   child.wait().expect("hmm");
-//   break;
-// }

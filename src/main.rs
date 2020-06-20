@@ -1,7 +1,9 @@
+use anyhow::Result;
 use clap::Clap;
 
 mod config;
 mod create;
+mod files;
 mod init;
 
 /// Box up your Wine apps and turn them into Mac Apps.
@@ -21,7 +23,7 @@ enum SubCommand {
     Init(init::Init),
 }
 
-fn main() {
+fn main() -> Result<()> {
     let opts: Opts = Opts::parse();
 
     // Dispatch handlers for subcommands

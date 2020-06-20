@@ -1,5 +1,5 @@
+use anyhow::Result;
 use clap::Clap;
-
 use std::fs::File;
 use std::io::prelude::*;
 use std::path::Path;
@@ -12,20 +12,13 @@ pub struct Init {
     file: String,
 }
 
-pub fn init(opts: Init) {
+pub fn init(opts: Init) -> Result<()> {
     let path = Path::new(&opts.file);
-    let display = path.display();
-
-    let mut file = match File::create(&path) {
-        Err(why) => panic!("couldn't create {}: {}", display, why),
-        Ok(file) => file,
-    };
+    let mut file = File::create(&path)?;
 
     // Write the `EXAMPLE_CONFIG` string to `file`, returns `io::Result<()>`
-    match file.write_all(EXAMPLE_CONFIG.as_bytes()) {
-        Err(why) => panic!("couldn't write to {}: {}", display, why),
-        Ok(_) => println!("Successfully wrote the example config file to {}", display),
-    }
+    file.write_all(EXAMPLE_CONFIG.as_bytes())?;
+    Ok(())
 }
 
 static EXAMPLE_CONFIG: &str = r###"# This is an example configuration file that can be used
@@ -76,12 +69,21 @@ prefix_arch = "win64"
 # if you want to use an existing wineprefix as the base, you can specify its
 # path, default empty
 #
-base_prefix = "path/to/existing/wineprefix/on/host"
+# base_prefix = "path/to/existing/wineprefix/on/host"
 
 # Sandbox the wineprefix, default true.
 # Can also be enabled by specifying "sandbox" as a verb to winetricks
 #
 sandbox = true
+
+# If you want to run any .NET, you need to install Mono. Default false
+#
+install_mono = false
+
+# If you want a mini webbrowser, you should install Gecko. Some apps use embedded HTML
+# which requires Gecko. Default false
+#
+install_gecko = false
 
 # if you want to copy any files or folders over to the wineprefix,
 # you can specify the file/folder on the host to copy

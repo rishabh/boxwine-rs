@@ -1,12 +1,18 @@
 use crate::config;
+use crate::files::info_plist;
+use crate::files::launch;
+
+use anyhow::{Context, Result};
 use clap::Clap;
+use fs_extra::dir::CopyOptions;
 use std::error::Error;
 use std::fs;
-use std::fs::File;
 use std::io::prelude::*;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use ureq;
+
+const WINEPREFIX_DIR_NAME: &str = "wineprefix";
 
 /// Create a Mac app from a config file
 #[derive(Clap)]
@@ -20,11 +26,7 @@ pub struct Create {
     output: String,
 }
 
-pub fn create(opts: Create) {
-    let output_path = Path::new(&opts.output);
-    let temp_app_path = &fs::canonicalize(output_path.join(".boxwine"))
-        .expect("unable to specify temporary app directory");
-
+pub fn create(opts: Create) -> Result<()> {
     // validate options
     if !opts.output.as_str().ends_with(".app") {
         panic!(r#"output "{}" must end with ".app"#, opts.output);
@@ -34,88 +36,166 @@ pub fn create(opts: Create) {
     let config = &config::load(opts.file);
 
     // make .app.boxwine directory and set up inner directories
-    create_app_bundle(temp_app_path);
+    let temp_app_path = create_app_bundle(config, &opts.output)?;
 
     // download portable wine into it
     let url = config.get_portable_wine_url();
-    download_portable_wine(url, temp_app_path);
+    let wine_archive_path = download_portable_wine(url, &temp_app_path)?;
 
-    // create wineprefix
-    let wineprefix_path = create_wineprefix(config, temp_app_path);
+    // extract wine and get the location of the wine directory
+    let wine_dir = extract_wine(wine_archive_path, &temp_app_path)?;
+
+    // initialize the wineprefix
+    let wineprefix_path = initialize_wineprefix(config, wine_dir, &temp_app_path)?;
 
     // use winetricks to download/install verbs
-    install_winetricks_verbs(config, wineprefix_path);
+    install_winetricks_verbs(config, wineprefix_path)?;
+    Ok(())
 }
 
 /// Create app bundle
-fn create_app_bundle<P: AsRef<Path>>(app_path: P) {
-    fs::create_dir(app_path).expect("unable to create app directory");
+fn create_app_bundle(config: &config::Config, output_path: &String) -> Result<PathBuf> {
+    let temp_app_path = Path::new(output_path);
 
-    let mac_os = app_path.join("Contents/MacOS");
-    fs::create_dir_all(mac_os).expect("unable to create Contents/MacOS directory");
+    fs::create_dir(&temp_app_path)
+        .with_context(|| format!("Creating {}", temp_app_path.display()))?;
 
-    let resources = app_path.join("Contents/Resources");
-    fs::create_dir_all(resources).expect("unable to create Contents/Resources directory");
+    let contents_resources = temp_app_path.join("Contents/Resources");
+    fs::create_dir_all(contents_resources)
+        .with_context(|| "Creating Contents/Resources directory")?;
+
+    let contents_macos = temp_app_path.join("Contents/MacOS");
+    fs::create_dir_all(contents_macos).with_context(|| "Creating Contents/MacOS directory")?;
+
+    info_plist::create_info_plist(config, temp_app_path)?;
+    launch::create_launch(config, WINEPREFIX_DIR_NAME, temp_app_path)?;
+
+    Ok(temp_app_path.to_path_buf())
 }
 
 /// Download portable wine from {url} and extract it
-fn download_portable_wine<P: AsRef<Path>>(url: String, app_path: P) {
+fn download_portable_wine(url: String, app_path: &PathBuf) -> Result<PathBuf> {
     let tarball_name = Path::new(&url).file_name().unwrap().to_str().unwrap();
+    let tarball_path = app_path.join("Contents/MacOS").join(tarball_name);
 
     println!("Downloading {} ... ", tarball_name);
     let resp = ureq::get(&url).call();
-
     println!("Done!");
 
-    // println!("Writing archive to disk ... ");
-    //
-    // let len = resp
-    //     .header("Content-Length")
-    //     .and_then(|s| s.parse::<usize>().ok())
-    //     .unwrap();
-    //
-    // let mut reader = resp.into_reader();
-    // let mut bytes = Vec::with_capacity(len); // pre-alloc to save some time
-    // reader.read_to_end(&mut bytes).unwrap();
-    //
-    // let mut file = match File::create(&tarball_name) {
-    //     Err(why) => panic!("couldn't create {}: {}", tarball_name, why),
-    //     Ok(file) => file,
-    // };
-    //
-    // match file.write_all(bytes.as_slice()) {
-    //     Err(why) => panic!("couldn't write to {}: {}", tarball_name, why),
-    //     Ok(_) => print!("Done!\n"),
-    // }
-    //
-    // println!("Extracting archive ... ");
-    //
-    // // It's actually faster to call tar -xf directly to unpack archives than
-    // // using any Rust crate to do so as of today (06-15-2020)
-    // // This now means we have a system dependency on tar. And that's fine.
-    // let status = Command::new("tar")
-    //     .arg("-xf")
-    //     .arg(tarball_name)
-    //     .status()
-    //     .expect("Unable to extract");
-    //
-    // println!("Done!");
+    println!("Writing archive to disk ... ");
+
+    // TODO: Don't depend on Content-Length for initializing byte buffer if we somehow can't parse it
+    let len = resp.header("Content-Length").unwrap().parse::<usize>()?;
+
+    let mut reader = resp.into_reader();
+    let mut bytes = Vec::with_capacity(len); // pre-alloc for performance reasons
+    reader.read_to_end(&mut bytes)?;
+
+    let mut file = fs::File::create(&tarball_path)?;
+
+    file.write_all(bytes.as_slice())?;
+    println!("Done!");
+
+    Ok(tarball_path)
+}
+
+fn extract_wine(wine_archive_path: PathBuf, app_path: &PathBuf) -> Result<PathBuf> {
+    println!("Extracting archive ... ");
+
+    // Directory containing wine
+    let contents_macos = &app_path.join("Contents/MacOS");
+
+    // It's actually faster to call tar -xf directly to unpack archives than
+    // using any Rust crate to do so as of today (06-15-2020)
+    // This now means we have a system dependency on tar. And that's fine.
+    Command::new("tar")
+        .arg("-xf")
+        .arg(wine_archive_path.to_str().unwrap())
+        .arg("-C")
+        .arg(contents_macos)
+        .status()
+        .with_context(|| "Extracting Wine archive")?;
+
+    // Wine is extracted to a folder called "usr", let's rename it to "wine", instead.
+    let orig_wine_dir = contents_macos.join("usr");
+    let new_wine_dir = contents_macos.join("wine");
+
+    fs::rename(orig_wine_dir, &new_wine_dir)
+        .with_context(|| r#"Renaming Wine directory from "usr" to "wine""#)?;
+    println!("Done!");
+
+    Ok(new_wine_dir)
 }
 
 /// Create wineprefix
-fn create_wineprefix<P: AsRef<Path>>(config: &config::Config, temp_app_path: P) {
-    let base_prefix = config.get_base_prefix();
-
+fn initialize_wineprefix(
+    config: &config::Config,
+    wine_dir: PathBuf,
+    app_path: &PathBuf,
+) -> Result<PathBuf> {
     // if the user defined a base prefix, copy it over
-    // otherwise, create one using the wine binary inside the app
+    let base_prefix = config.get_base_prefix();
+    let macos_path = app_path
+        .join("Contents/MacOS/")
+        .canonicalize()
+        .with_context(|| "Getting absolute path to the MacOS directory in the app")?;
+
+    let wineprefix_path = macos_path.join(WINEPREFIX_DIR_NAME);
+    match base_prefix {
+        Some(b) => copy_wineprefix(b, &wineprefix_path),
+        None => create_wineprefix(config, wine_dir, &wineprefix_path),
+    }?;
+
+    Ok(wineprefix_path)
+}
+
+fn copy_wineprefix(base_prefix: &String, wineprefix_path: &PathBuf) -> Result<()> {
+    let copy_options = fs_extra::dir::CopyOptions::new();
+
+    fs_extra::dir::copy(base_prefix, wineprefix_path, &copy_options).with_context(|| {
+        format!(
+            "Copying base wineprefix from {} to {}",
+            base_prefix,
+            wineprefix_path.display()
+        )
+    })?;
+
+    Ok(())
+}
+
+fn create_wineprefix(
+    config: &config::Config,
+    wine_dir: PathBuf,
+    wineprefix_path: &PathBuf,
+) -> Result<()> {
+    let wineboot_path = wine_dir.join("bin/wineboot");
+
+    Command::new(wineboot_path)
+        .arg("-u")
+        .env("WINEPREFIX", wineprefix_path)
+        .env("WINEDLLOVERRIDES", config.get_wine_dll_overrides())
+        .status()
+        .with_context(|| format!("Creating wineprefix at {}", wineprefix_path.display()))?;
+
+    Ok(())
 }
 
 /// Install winetricks verbs
-fn install_winetricks_verbs<P: AsRef<Path>>(config: &config::Config, wineprefix_path: P) {
-    let verbs = config.get_verbs();
-    for verb in verbs:
-        // install verb
+fn install_winetricks_verbs(config: &config::Config, wineprefix_path: PathBuf) -> Result<()> {
+    let mut verbs: Vec<String> = config.get_verbs().clone();
 
-    let sandbox = config.get_sandbox();
-    // install sandbox
+    // also sandbox the prefix if we want to
+    if *config.get_sandbox() {
+        verbs.push("sandbox".to_string());
+    }
+
+    // install verbs
+    Command::new("winetricks")
+        .args(verbs)
+        .env("WINEPREFIX", wineprefix_path)
+        .env("WINEDLLOVERRIDES", config.get_wine_dll_overrides())
+        .status()
+        .with_context(|| "Installing verbs")?;
+
+    Ok(())
 }
