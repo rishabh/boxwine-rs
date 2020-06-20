@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::ffi::OsStr;
 use std::fs;
 
 #[derive(Deserialize)]
@@ -34,18 +35,21 @@ struct Prefix {
     sandbox: bool,
     install_gecko: bool,
     install_mono: bool,
+    delete_installers: bool,
+    compress_wineprefix: bool,
 }
 
 #[derive(Deserialize)]
-struct Volume {
-    from: String,
-    to: String,
+pub struct Volume {
+    pub from: String,
+    pub to: String,
+    pub post_install: Option<bool>,
 }
 
 #[derive(Deserialize)]
-struct Run {
-    program: String,
-    args: Option<Vec<String>>,
+pub struct Run {
+    pub program: String,
+    pub args: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -84,6 +88,8 @@ impl Default for Config {
                     sandbox: true,
                     install_mono: true,
                     install_gecko: false,
+                    delete_installers: true,
+                    compress_wineprefix: true,
                 },
                 volumes: vec![],
                 runs: vec![],
@@ -133,6 +139,18 @@ impl Config {
 
     pub fn get_base_prefix(&self) -> &Option<String> {
         return &self.wine.prefix.base_prefix;
+    }
+
+    pub fn get_compress_wineprefix(&self) -> &bool {
+        return &self.wine.prefix.compress_wineprefix;
+    }
+
+    pub fn get_volumes(&self) -> &Vec<Volume> {
+        return &self.wine.volumes;
+    }
+
+    pub fn get_runs(&self) -> &Vec<Run> {
+        return &self.wine.runs;
     }
 }
 

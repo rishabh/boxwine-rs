@@ -15,10 +15,19 @@ macro_rules! format_launch_script {
 DIR="$( cd "$( dirname "${{BASH_SOURCE[0]}}" )" >/dev/null 2>&1 && pwd )"
 
 
+WINEPREFIX="${{DIR}}/{}"
+
+if test -f "${{WINEPREFIX}}.tar.gz"; then
+    echo "Uncompressing wineprefix ..."
+    tar -xzf "${{WINEPREFIX}}.tar.gz" -C "${{WINEPREFIX}}"
+    rm "${{WINEPREFIX}}.tar.gz"
+    echo "Done!"
+fi
+
 WINE="${{DIR}}/wine/bin/wine"
 
 # Launch wine
-WINEPREFIX="${{DIR}}/{}" "${{WINE}}" start 'C:/windows/system32/cmd.exe'
+WINEPREFIX="${{WINEPREFIX}}" "${{WINE}}" start 'C:/windows/system32/cmd.exe'
 "###, $($e,)+);
     }
 }

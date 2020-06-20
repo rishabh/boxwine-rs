@@ -85,18 +85,34 @@ install_mono = false
 #
 install_gecko = false
 
+# To save some space, you can delete C:/windows/Installers directory, default true
+#
+delete_installers = true
+
+# Compress the wineprefix after the app has been built. When the user first starts the app,
+# the prefix will be uncompressed. Default true.
+#
+compress_wineprefix = true
+
 # if you want to copy any files or folders over to the wineprefix,
-# you can specify the file/folder on the host to copy
-# into the wineprefix. Both Windows paths with backslashes and
-# forward slashes are supported. Default empty.
+# you can specify the file/folder on the host/wineprefix to copy into the
+# wineprefix. Both Windows paths with backslashes and forward slashes
+# are supported. Wineprefix paths must begin with "c:". Default empty.
+# You can also specify if you want to copy any files *after* installing
+# programs.
 #
 [[wine.volume]]
-from = "on/host/file.txt"
-to = 'C:\in\wine\file.txt'
+from = "/on/host/program.exe"
+to = 'c:\in\wineprefix\program.exe'
 
 [[wine.volume]]
-from = "on/host/folder"
-to = "C:/in/wine/folder"
+from = "/on/host/folder"
+to = "c:/in/wineprefix/folder"
+
+[[wine.volume]]
+from = "c:/in/wineprefix/another/file.txt"
+to = "c:/in/wineprefix/another/file.bak.txt"
+post_install = true
 
 # programs that you want to run/install in the wineprefix, default empty.
 # You can specify programs on the host or in the wineprefix

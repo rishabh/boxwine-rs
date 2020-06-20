@@ -5,11 +5,13 @@ use crate::files::launch;
 use anyhow::{Context, Result};
 use clap::Clap;
 use fs_extra::dir::CopyOptions;
+use fs_extra::error::ErrorKind::OsString;
 use std::error::Error;
+use std::ffi::OsStr;
 use std::fs;
 use std::io::prelude::*;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use ureq;
 
 const WINEPREFIX_DIR_NAME: &str = "wineprefix";
@@ -46,10 +48,24 @@ pub fn create(opts: Create) -> Result<()> {
     let wine_dir = extract_wine(wine_archive_path, &temp_app_path)?;
 
     // initialize the wineprefix
-    let wineprefix_path = initialize_wineprefix(config, wine_dir, &temp_app_path)?;
+    let wineprefix_path = initialize_wineprefix(config, &wine_dir, &temp_app_path)?;
 
     // use winetricks to download/install verbs
-    install_winetricks_verbs(config, wineprefix_path)?;
+    install_winetricks_verbs(config, &wineprefix_path)?;
+
+    // Copy files/directories, pre-install
+    copy_volumes(config, &wineprefix_path, false)?;
+
+    // Install the programs
+    install_programs(config, &wine_dir, &wineprefix_path)?;
+
+    // Copy files/directories, post-install
+    copy_volumes(config, &wineprefix_path, true)?;
+
+    // Post-install
+    // compress the wineprefix if configured
+    compress_wineprefix(config, &wineprefix_path)?;
+
     Ok(())
 }
 
@@ -113,8 +129,12 @@ fn extract_wine(wine_archive_path: PathBuf, app_path: &PathBuf) -> Result<PathBu
         .arg(wine_archive_path.to_str().unwrap())
         .arg("-C")
         .arg(contents_macos)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .with_context(|| "Extracting Wine archive")?;
+
+    fs::remove_file(wine_archive_path).with_context(|| "Removing Wine archive")?;
 
     // Wine is extracted to a folder called "usr", let's rename it to "wine", instead.
     let orig_wine_dir = contents_macos.join("usr");
@@ -130,7 +150,7 @@ fn extract_wine(wine_archive_path: PathBuf, app_path: &PathBuf) -> Result<PathBu
 /// Create wineprefix
 fn initialize_wineprefix(
     config: &config::Config,
-    wine_dir: PathBuf,
+    wine_dir: &PathBuf,
     app_path: &PathBuf,
 ) -> Result<PathBuf> {
     // if the user defined a base prefix, copy it over
@@ -141,6 +161,7 @@ fn initialize_wineprefix(
         .with_context(|| "Getting absolute path to the MacOS directory in the app")?;
 
     let wineprefix_path = macos_path.join(WINEPREFIX_DIR_NAME);
+
     match base_prefix {
         Some(b) => copy_wineprefix(b, &wineprefix_path),
         None => create_wineprefix(config, wine_dir, &wineprefix_path),
@@ -165,7 +186,7 @@ fn copy_wineprefix(base_prefix: &String, wineprefix_path: &PathBuf) -> Result<()
 
 fn create_wineprefix(
     config: &config::Config,
-    wine_dir: PathBuf,
+    wine_dir: &PathBuf,
     wineprefix_path: &PathBuf,
 ) -> Result<()> {
     let wineboot_path = wine_dir.join("bin/wineboot");
@@ -174,6 +195,8 @@ fn create_wineprefix(
         .arg("-u")
         .env("WINEPREFIX", wineprefix_path)
         .env("WINEDLLOVERRIDES", config.get_wine_dll_overrides())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .with_context(|| format!("Creating wineprefix at {}", wineprefix_path.display()))?;
 
@@ -181,7 +204,7 @@ fn create_wineprefix(
 }
 
 /// Install winetricks verbs
-fn install_winetricks_verbs(config: &config::Config, wineprefix_path: PathBuf) -> Result<()> {
+fn install_winetricks_verbs(config: &config::Config, wineprefix_path: &PathBuf) -> Result<()> {
     let mut verbs: Vec<String> = config.get_verbs().clone();
 
     // also sandbox the prefix if we want to
@@ -194,8 +217,107 @@ fn install_winetricks_verbs(config: &config::Config, wineprefix_path: PathBuf) -
         .args(verbs)
         .env("WINEPREFIX", wineprefix_path)
         .env("WINEDLLOVERRIDES", config.get_wine_dll_overrides())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .with_context(|| "Installing verbs")?;
+
+    Ok(())
+}
+
+fn copy_volumes(
+    config: &config::Config,
+    wineprefix_path: &PathBuf,
+    post_install: bool,
+) -> Result<()> {
+    let volumes = config.get_volumes();
+    let dosdrives = wineprefix_path.join("dosdrives");
+    let mut options = fs_extra::dir::CopyOptions::new();
+    options.overwrite = true;
+
+    for volume in volumes {
+        let volume_from = &volume.from;
+        let volume_to = &volume.to;
+        let volume_post_install = &volume.post_install.unwrap_or_default();
+
+        if post_install == *volume_post_install {
+            // *super* lazy check to see if the output path is in the wineprefix
+            assert!(volume_to.starts_with("c:"));
+
+            let to_wineprefix = dosdrives.join(volume_to);
+            println!("to_wineprefix: {}", to_wineprefix.to_str().unwrap());
+
+            // create directories so we can copy items to directories that don't yet exist
+            fs_extra::dir::create_all(&to_wineprefix.join(".."), false).with_context(|| {
+                format!(
+                    "Creating directories to copy volume {} to {}",
+                    volume_from, volume_to
+                )
+            })?;
+
+            let mut from_paths = vec![];
+            if volume_from.starts_with("c:") {
+                from_paths.push(dosdrives.join(volume_from))
+            } else {
+                from_paths.push(Path::new(volume_from).to_path_buf())
+            }
+
+            fs_extra::copy_items(&from_paths, &to_wineprefix, &options).with_context(|| {
+                format!(
+                    "Copying volume from {} to {}",
+                    volume_from,
+                    to_wineprefix.to_str().unwrap()
+                )
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
+fn install_programs(
+    config: &config::Config,
+    wine_dir: &PathBuf,
+    wineprefix_path: &PathBuf,
+) -> Result<()> {
+    let runs = config.get_runs();
+    let wine_path = wine_dir.join("bin/wine");
+
+    for run in runs {
+        let mut prog = Command::new(&wine_path);
+        let mut prog_with_args = prog.arg(wineprefix_path).arg("start").arg(&run.program);
+
+        if run.args.is_some() {
+            let run_args = run.args.as_ref().unwrap();
+            let osstr_args = run_args.iter().map(OsStr::new).collect::<Vec<&OsStr>>();
+
+            prog_with_args = prog_with_args.args(osstr_args);
+        }
+
+        prog_with_args
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .with_context(|| format!("Running program {}", run.program))?;
+    }
+    Ok(())
+}
+
+fn compress_wineprefix(config: &config::Config, wineprefix_path: &PathBuf) -> Result<()> {
+    if *config.get_compress_wineprefix() {
+        Command::new("tar")
+            .arg("-czf")
+            .arg(wineprefix_path.join(format!("../{}.tar.gz", WINEPREFIX_DIR_NAME)))
+            .arg("-C")
+            .arg(wineprefix_path)
+            .arg(".")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .with_context(|| "Compressing wineprefix")?;
+
+        fs::remove_dir_all(wineprefix_path).with_context(|| "Removing wineprefix dir")?;
+    }
 
     Ok(())
 }
